@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:9001 ws://localhost:9001; img-src 'self' data: blob: file:;" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+  <title>Fitlappy Duck</title>
+  <style>
+    html, body { margin:0; padding:0; width:100%; height:100%; background:#111; color:#f5f5f5; font-family:sans-serif; overflow:hidden; }
+    #hud { position:fixed; top:14px; left:14px; z-index:4; font-family:'VT323','Press Start 2P',monospace; font-size:20px; color:#ffeb7f; background:rgba(0,0,0,0.35); padding:10px 14px; border:2px solid #ffbf3f; border-radius:10px; box-shadow:0 0 10px rgba(255,191,63,0.6); text-shadow:2px 2px 0 #000; }
+    #game { position:relative; width:100vw; height:100vh; overflow:hidden; background:#1e1e1e; }
+    #bg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:0; background-image:url('my-phaser-game/src/assets/landscape.png'); background-repeat:repeat-x; background-size:auto 100%; opacity:0.95; }
+    #ground-tiler { position:absolute; left:0; bottom:0; height:140px; width:100%; z-index:1; background-image:url('my-phaser-game/src/assets/platform.png'); background-repeat:repeat-x; background-size:200px 140px; will-change:transform; }
+    #obstacles { position:absolute; inset:0; pointer-events:none; z-index:2; overflow:hidden; }
+    #runner { position:absolute; left:140px; bottom:18px; width:320px; image-rendering:pixelated; transition:transform 1000ms ease; z-index:3; }
+    .obstacle { position:absolute; bottom:0; image-rendering:pixelated; }
+    #gameover-banner { position:fixed; inset:0; display:none; flex-direction:column; gap:16px; align-items:center; justify-content:center; z-index:6; font-family:'Press Start 2P', monospace; font-size:48px; color:#ff4d4d; text-shadow:2px 2px 0 #000; }
+    #score-line { font-size:20px; color:#fff; text-shadow:2px 2px 0 #000; }
+    #play-again, #play-btn { padding:12px 18px; font-family:'Press Start 2P', monospace; font-size:14px; cursor:pointer; background:#222; color:#fff; border:2px solid #ff4d4d; }
+    #cam-wrap { position:fixed; top:16px; right:16px; width:320px; height:240px; border:1px solid #333; background:#000; overflow:hidden; z-index:5; }
+    #overlay { position:absolute; width:100%; height:100%; pointer-events:none; }
+    #audio-tip { position:fixed; top:10px; left:50%; transform:translateX(-50%); padding:8px 12px; background:rgba(0,0,0,0.6); color:#fff; font-family:'VT323','Press Start 2P',monospace; font-size:16px; z-index:5; border:1px solid #ffbf3f; border-radius:8px; box-shadow:0 0 8px rgba(255,191,63,0.5); display:none; }
+    #home { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:20px; z-index:7; background:rgba(0,0,0,0.7); font-family:'Press Start 2P',monospace; color:#ffeb7f; text-align:center; padding:20px; }
+    #home h1 { margin:0; font-size:32px; }
+    #home p { margin:0; font-size:14px; color:#fff; text-shadow:1px 1px 0 #000; }
+    #loading { font-size:16px; color:#fff; }
+  </style>
+</head>
+<body>
+  <div id="hud">Reps: <span id="reps">0</span> | Dodged: <span id="dodged">0</span></div>
+  <div id="game">
+    <div id="bg"></div>
+    <div id="ground-tiler"></div>
+    <div id="obstacles"></div>
+    <img id="runner" src="my-phaser-game/src/assets/idle.gif" alt="runner" />
+  </div>
+  <div id="gameover-banner">
+    <div>GAME OVER</div>
+    <div id="score-line">Score: 0</div>
+    <button id="play-again">Play Again</button>
+  </div>
+  <div id="cam-wrap">
+    <canvas id="overlay"></canvas>
+  </div>
+  <div id="audio-tip">Tap to enable sound</div>
+  <div id="home">
+    <h1>Fitlappy Duck</h1>
+    <p>Push-up to fly up. Relax to run. Dodge boxes and rocks.</p>
+    <div id="loading">Loading audio...</div>
+    <button id="play-btn" disabled>Play</button>
+  </div>
+  <script>
+    const repsEl = document.getElementById('reps');
+    const dodgedEl = document.getElementById('dodged');
+    const runner = document.getElementById('runner');
+    const groundTiler = document.getElementById('ground-tiler');
+    const obstaclesLayer = document.getElementById('obstacles');
+    const playAgainBtn = document.getElementById('play-again');
+    const playBtn = document.getElementById('play-btn');
+    const home = document.getElementById('home');
+    const audioTip = document.getElementById('audio-tip');
+    const loadingEl = document.getElementById('loading');
+    const MANUAL_CONTROL = false;
+    let gameStarted = false;
+
+    // Audio
+    const bgAudio = new Audio('./my-phaser-game/src/assets/background-music.ogg');
+    bgAudio.loop = true; bgAudio.preload = 'auto';
+    const crashAudio = new Audio('./my-phaser-game/src/assets/crash.ogg');
+    crashAudio.preload = 'auto';
+    let audioStarted = false;
+    let audioReady = false;
+
+    Promise.all([
+      bgAudio.play().then(()=>{bgAudio.pause(); bgAudio.currentTime=0;}).catch(()=>{}),
+      crashAudio.play().then(()=>{crashAudio.pause(); crashAudio.currentTime=0;}).catch(()=>{})
+    ]).finally(()=>{
+      audioReady = true;
+      loadingEl.textContent = 'Ready';
+      playBtn.disabled = false;
+    });
+
+    function startAudio(){
+      if (audioStarted) return;
+      audioStarted = true;
+      audioTip.style.display='none';
+      bgAudio.currentTime = 0;
+      bgAudio.play().catch(()=>{});
+    }
+    function stopBg(){ bgAudio.pause(); }
+    function playCrash(){ crashAudio.currentTime = 0; crashAudio.play().catch(()=>{}); }
+
+    const ASSETS = { down:'my-phaser-game/src/assets/walk.gif', up:'my-phaser-game/src/assets/floating_flap.gif', death:'my-phaser-game/src/assets/death.gif', idle:'my-phaser-game/src/assets/idle.gif' };
+    const SIZES = { down:320, up:235, death:320, idle:320 };
+
+    const obstacles = [];
+    let spawnCountdown = 400;
+    const minGap = 350, maxGap=650;
+    const baseObstacleSpeed = 4.8; let obstacleSpeed = baseObstacleSpeed;
+    const obstacleSprites = { box:{src:'my-phaser-game/src/assets/box.png', width:90, bottom:95}, rock:{src:'my-phaser-game/src/assets/rock.png', width:140, bottom:255} };
+    let lastObstacleType='rock';
+    let gameOver=false; let rafId=null;
+    let groundOffset=0, bgOffset=0; const groundSpeed=2, bgSpeed=0.6;
+    let repCount=0, dodgedCount=0;
+    let poseStart=0;
+
+    function resetGame() {
+      gameOver = false;
+      gameStarted = false;
+      obstacles.forEach(ob=>ob.el.remove());
+      obstacles.length = 0;
+      spawnCountdown = 400;
+      groundOffset = bgOffset = 0;
+      repCount = 0; dodgedCount = 0;
+      repsEl.textContent = '0'; dodgedEl.textContent = '0';
+      runner.src = ASSETS.idle;
+      runner.style.transform = 'translateY(0)';
+      home.style.display = 'flex';
+      document.getElementById('gameover-banner').style.display='none';
+    }
+
+    function spawnObstacle(){
+      const type = (lastObstacleType==='box') ? 'rock' : 'box';
+      lastObstacleType=type;
+      const sprite = obstacleSprites[type];
+      const el=document.createElement('img'); el.src=sprite.src; el.className='obstacle'; el.style.width=sprite.width+'px'; el.style.bottom=sprite.bottom+'px';
+      const x=window.innerWidth+200; el.style.left=x+'px';
+      obstaclesLayer.appendChild(el); obstacles.push({el,x,type});
+    }
+
+    function setPose(pose){
+      if(gameOver||!gameStarted) return;
+      runner.dataset.pose=pose; poseStart=performance.now();
+      runner.src=ASSETS[pose]||ASSETS.down; runner.style.width=(SIZES[pose]||320)+'px';
+      runner.style.transform = (pose==='up') ? 'translateY(-200px)' : 'translateY(0)';
+    }
+
+    function scrollLoop(){
+      if(gameOver||!gameStarted) return;
+      groundOffset -= groundSpeed*4.0; bgOffset -= bgSpeed*4.0;
+      if(groundOffset<=-2000) groundOffset=0; if(bgOffset<=-2000) bgOffset=0;
+      groundTiler.style.backgroundPosition=`${groundOffset}px 0px`;
+      document.getElementById('bg').style.backgroundPosition=`${bgOffset}px 0px`;
+
+      spawnCountdown -= obstacleSpeed;
+      if(spawnCountdown<=0){ spawnObstacle(); spawnCountdown=Math.random()*(maxGap-minGap)+minGap; }
+
+      const runnerRect=runner.getBoundingClientRect();
+      for(let i=obstacles.length-1;i>=0;i--){
+        const ob=obstacles[i]; ob.x -= obstacleSpeed*(1+Math.random()*0.3); ob.el.style.left=ob.x+'px';
+        if(ob.type==='rock'){ ob.rot=(ob.rot||0)+6; ob.el.style.transform=`translateZ(0) rotate(${ob.rot}deg)`; }
+        if(!ob.counted && (ob.x + ob.el.offsetWidth) < runnerRect.left){ ob.counted=true; dodgedCount++; dodgedEl.textContent=dodgedCount; }
+        if(ob.x < -200){ obstaclesLayer.removeChild(ob.el); obstacles.splice(i,1); }
+      }
+
+      for(const ob of obstacles){
+        const rect=ob.el.getBoundingClientRect();
+        let padX=runnerRect.width*0.3, padY=runnerRect.height*0.2;
+        if(ob.type==='rock'){
+          if(runner.dataset.pose!=='up') continue;
+          if(performance.now() - poseStart < 300) continue;
+          padX=runnerRect.width*0.4; padY=runnerRect.height*0.5;
+        }
+        const overlap = !((rect.right - padX) < runnerRect.left || (rect.left + padX) > runnerRect.right || (rect.bottom - padY) < runnerRect.top || (rect.top + padY) > runnerRect.bottom);
+        if(overlap){
+          gameOver=true; runner.src=ASSETS.death; runner.style.transform='translateY(0)'; runner.style.animation='none';
+          stopBg(); playCrash();
+          document.getElementById('score-line').textContent=`Score: ${dodgedCount} | Reps: ${repCount}`;
+          document.getElementById('gameover-banner').style.display='flex';
+          return;
+        }
+      }
+      rafId=requestAnimationFrame(scrollLoop);
+    }
+
+    // controls
+    if(MANUAL_CONTROL){
+      window.addEventListener('keydown',e=>{ if(gameOver||!gameStarted) return; if(e.key==='ArrowUp'){startAudio(); setPose('up');} if(e.key==='ArrowDown'){startAudio(); setPose('down');} });
+    }else{
+      function connect(){
+        const ws=new WebSocket('ws://127.0.0.1:9001');
+        ws.onopen=()=>{};
+        ws.onclose=()=>{setTimeout(connect,1000);};
+        ws.onerror=()=>{};
+        ws.onmessage=({data})=>{
+          try{
+            const msg=JSON.parse(data); startAudio();
+            if(msg.event==='down') setPose('down');
+            if(msg.event==='up'){ repCount=msg.count??repCount; repsEl.textContent=repCount; setPose('up'); }
+            if(msg.event==='landmarks' && msg.landmarks){ latestLandmarks=msg.landmarks; }
+          }catch(e){ console.error(e); }
+        };
+      }
+      connect();
+    }
+
+    playAgainBtn.addEventListener('click',()=>{ stopBg(); audioStarted=false; resetGame(); });
+    ['click','touchstart'].forEach(evt=>{ window.addEventListener(evt, ()=>startAudio(), {once:true}); });
+
+    // Landmarks overlay
+    const canvas=document.getElementById('overlay'); canvas.width=320; canvas.height=240; const ctx=canvas.getContext('2d');
+    const connections=[[11,13],[13,15],[12,14],[14,16],[11,12],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28],[27,31],[28,32]];
+    let latestLandmarks=null;
+    function drawLandmarks(){
+      ctx.save(); ctx.clearRect(0,0,canvas.width,canvas.height); ctx.translate(canvas.width,0); ctx.scale(-1,1);
+      if(gameStarted && latestLandmarks && latestLandmarks.length){
+        const poseColor = (runner.dataset.pose==='up') ? '#4dc3ff' : '#00ff55';
+        ctx.strokeStyle=poseColor; ctx.lineWidth=5; ctx.fillStyle=poseColor;
+        connections.forEach(([a,b])=>{ const pa=latestLandmarks[a], pb=latestLandmarks[b]; if(pa&&pb){ ctx.beginPath(); ctx.moveTo(pa.x*canvas.width, pa.y*canvas.height); ctx.lineTo(pb.x*canvas.width, pb.y*canvas.height); ctx.stroke(); }});
+        latestLandmarks.forEach(p=>{ if(!p) return; ctx.beginPath(); ctx.arc(p.x*canvas.width, p.y*canvas.height, 4, 0, Math.PI*2); ctx.fill(); });
+      }
+      ctx.restore(); requestAnimationFrame(drawLandmarks);
+    }
+    drawLandmarks();
+
+    // Play button
+    playBtn.addEventListener('click', ()=>{
+      if(!audioReady) return;
+      home.style.display='none';
+      gameStarted=true;
+      runner.src = ASSETS.down;
+      startAudio();
+      scrollLoop();
+    });
+  </script>
+</body>
+</html>
